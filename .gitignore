@@ -39,3 +39,9 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# test temp data
+src/__tests__/.tmp-data/
+# runtime data (local JSON db + generated logs)
+/data/
+/public/generated_assets/
