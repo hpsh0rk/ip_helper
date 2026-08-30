@@ -82,6 +82,8 @@ export interface StoryboardFrame {
   imageUrl: string;
   isCover: boolean;
   status: 'idle' | 'generating' | 'completed' | 'error';
+  logId?: string;
+  lastError?: string;
 }
 
 export interface CoverOverlayConfig {
@@ -106,6 +108,7 @@ export interface StoryScript {
   xhsContent: string;
   xhsTags: string[];
   coverOverlay: CoverOverlayConfig;
+  baseImageUrl?: string;
   createdAt: string;
   locale: Locale;
 }

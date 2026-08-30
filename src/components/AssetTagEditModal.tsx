@@ -113,11 +113,13 @@ export function AssetTagEditModal({
         <div className="flex-1 overflow-y-auto p-5 space-y-4">
           {/* Asset Preview Mini Banner */}
           <div className="flex items-center gap-3.5 p-3 rounded-xl bg-zinc-950 border border-zinc-800">
-            <img
-              src={asset.url}
-              alt="asset preview"
-              className="w-14 h-16 object-cover rounded-lg border border-zinc-700 flex-shrink-0"
-            />
+            {asset.url ? (
+              <img
+                src={asset.url}
+                alt="asset preview"
+                className="w-14 h-16 object-cover rounded-lg border border-zinc-700 flex-shrink-0"
+              />
+            ) : null}
             <div className="flex-1 min-w-0">
               <div className="flex items-center justify-between">
                 <span className="text-[11px] font-bold text-zinc-300">Prompt 提示词依据</span>

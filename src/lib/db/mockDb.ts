@@ -2,6 +2,48 @@ import { IPProfile, StoryScript } from '@/types';
 
 export const initialIPProfiles: IPProfile[] = [
   {
+    id: 'ip-xiaojiu-01',
+    name: '小酒 (Xiao Jiu)',
+    description: '头戴棕色小熊帽、元气可爱、喜欢动手做手工道具的小酒',
+    archetype: '治愈系手工生活家元气萌系少年',
+    visualAnchors: {
+      hair: '棕红微卷短发，发尾带白色渐变挑染',
+      clothing: '米白色日常背心坎肩，日常休闲装扮',
+      accessories: '头戴可爱棕色小熊针织帽，随身携带手工制作小工具',
+      colorPalette: ['#8B4513', '#FFF8DC', '#FF6347', '#FFE4B5'],
+      distinctiveFeatures: '红润圆嘟嘟的腮红脸颊，大大的眼睛，神情生动治愈'
+    },
+    personality: {
+      traits: ['元气满满', '专注执着', '搞怪可爱', '动手达人'],
+      tagline: '今天本主角一定要把小酒的日常抓马做到极致！',
+      catchphrase: '看吧，按我的独家秘籍，完全没问题！',
+      flawOrConflict: '总是有很多奇思妙想，但偶尔也会遇到道具失控的抓马翻车现场'
+    },
+    worldview: '充满温馨阳光的手工工坊与温馨治愈生活日常。',
+    stylePreset: '3D Clay',
+    avatarUrl: 'https://images.unsplash.com/photo-1534447677768-be436bb09401?w=400&auto=format&fit=crop&q=80',
+    assets: [
+      {
+        id: 'asset-xiaojiu-01',
+        url: 'https://images.unsplash.com/photo-1534447677768-be436bb09401?w=400&auto=format&fit=crop&q=80',
+        prompt: 'Cute 3D claymation character Xiaojiu wearing brown bear hat, front view, Pop Mart blind box style, soft lighting, 8k render',
+        tags: ['front', '3d_clay', 'avatar'],
+        tag: 'front',
+        label: '主头像 / 正视图',
+        createdAt: new Date().toISOString()
+      }
+    ],
+    turnaroundSheets: {},
+    expressionSheets: [],
+    loraWeights: {
+      face: 0.85,
+      costume: 0.8,
+      style: 0.85
+    },
+    createdAt: new Date().toISOString(),
+    locale: 'zh'
+  },
+  {
     id: 'ip-cat-barista-01',
     name: '喵七七 (Miao Qiqi)',
     description: '爱喝奶茶但天天想减肥的打工人小猫咖啡师',

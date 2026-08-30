@@ -127,11 +127,13 @@ export function ImageLightboxModal({
 
         {/* Center Main Image */}
         <div className="relative overflow-hidden rounded-2xl border border-zinc-800 shadow-2xl bg-zinc-950 flex items-center justify-center max-h-[72vh]">
-          <img
-            src={imageUrl}
-            alt={title}
-            className="max-h-[72vh] max-w-full w-auto h-auto object-contain rounded-2xl"
-          />
+          {imageUrl ? (
+            <img
+              src={imageUrl}
+              alt={title}
+              className="max-h-[72vh] max-w-full w-auto h-auto object-contain rounded-2xl"
+            />
+          ) : null}
         </div>
 
         {/* Bottom Details Bar (Tags & Prompt) */}

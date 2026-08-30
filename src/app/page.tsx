@@ -3,7 +3,6 @@
 import React, { useState, useEffect } from 'react';
 import { I18nProvider, useI18n } from '@/lib/i18n/context';
 import { IPProfile, StoryScript, StoryboardFrame, Skill, ChatMessage } from '@/types';
-import { initialIPProfiles, initialStoryScript } from '@/lib/db/mockDb';
 import { Header } from '@/components/Header';
 import { CharacterManager } from '@/components/CharacterManager';
 import { StoryStudio } from '@/components/StoryStudio';
@@ -12,17 +11,19 @@ import { ImageModelSettingsModal } from '@/components/ImageModelSettingsModal';
 import { ImageEngineConfig } from '@/types';
 import { getProviderById } from '@/lib/render/modelProviders';
 import { generateStoryboardForIP } from '@/lib/agent/engine';
+import { compileDiffusionPrompt, translateAndRefineChinesePrompt } from '@/lib/i18n/promptTranslator';
+import { CheckCircle2, AlertCircle, AlertTriangle, Info, X } from 'lucide-react';
 
 function MainApp() {
   const { locale } = useI18n();
 
-  // Top-level Navigation View
+  // Top-level Navigation View (with localStorage persistence)
   const [activeView, setActiveView] = useState<'characters' | 'studio'>('characters');
 
   // Core Data States
-  const [allIPs, setAllIPs] = useState<IPProfile[]>(initialIPProfiles);
-  const [currentIP, setCurrentIP] = useState<IPProfile | undefined>(initialIPProfiles[0]);
-  const [story, setStory] = useState<StoryScript | undefined>(initialStoryScript);
+  const [allIPs, setAllIPs] = useState<IPProfile[]>([]);
+  const [currentIP, setCurrentIP] = useState<IPProfile | undefined>(undefined);
+  const [story, setStory] = useState<StoryScript | undefined>(undefined);
   const [skills, setSkills] = useState<Skill[]>([]);
   const [activeSkillIds, setActiveSkillIds] = useState<string[]>([
     'agency-xiaohongshu-specialist',
@@ -43,15 +44,47 @@ function MainApp() {
 
   // Modals & Feedback
   const [isSkillsModalOpen, setIsSkillsModalOpen] = useState(false);
-  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [toastInfo, setToastInfo] = useState<{
+    id: number;
+    message: string;
+    type: 'success' | 'error' | 'info' | 'warning';
+    detail?: string;
+  } | null>(null);
 
-  const showToast = (msg: string) => {
-    setToastMessage(msg);
-    setTimeout(() => setToastMessage(null), 3500);
+  const showToast = (
+    msg: string,
+    type: 'success' | 'error' | 'info' | 'warning' = 'info',
+    detail?: string,
+    duration?: number
+  ) => {
+    const id = Date.now();
+    setToastInfo({ id, message: msg, type, detail });
+    const timeout = duration || (type === 'error' ? 8000 : 3500);
+    setTimeout(() => {
+      setToastInfo(current => (current?.id === id ? null : current));
+    }, timeout);
+  };
+
+  const handleSwitchView = (view: 'characters' | 'studio') => {
+    setActiveView(view);
+    try {
+      localStorage.setItem('ip_helper_active_view', view);
+    } catch {
+      // ignore
+    }
   };
 
   // Initial Sync from API
   useEffect(() => {
+    try {
+      const savedView = localStorage.getItem('ip_helper_active_view') as 'characters' | 'studio' | null;
+      if (savedView === 'characters' || savedView === 'studio') {
+        setActiveView(savedView);
+      }
+    } catch {
+      // ignore
+    }
+
     fetch('/api/skills')
       .then(res => res.json())
       .then(data => {
@@ -62,27 +95,39 @@ function MainApp() {
     fetch('/api/ip')
       .then(res => res.json())
       .then(data => {
-        if (data.ips !== undefined) {
-          setAllIPs(data.ips);
-          if (data.ips.length > 0) {
-            setCurrentIP(data.ips[0]);
-          } else {
-            setCurrentIP(undefined);
-          }
-        }
-      })
-      .catch(console.error);
+        const ips: IPProfile[] = data.ips || [];
+        setAllIPs(ips);
 
-    fetch('/api/story')
-      .then(res => res.json())
-      .then(data => {
-        if (data.stories !== undefined) {
-          if (data.stories.length > 0) {
-            setStory(data.stories[0]);
-          } else {
-            setStory(undefined);
+        let targetIP: IPProfile | undefined;
+        try {
+          const savedIpId = localStorage.getItem('ip_helper_last_selected_ip_id');
+          if (savedIpId) {
+            targetIP = ips.find(item => item.id === savedIpId);
           }
+        } catch {
+          // ignore
         }
+
+        if (!targetIP && ips.length > 0) {
+          targetIP = ips[0];
+        }
+
+        setCurrentIP(targetIP);
+
+        fetch('/api/story')
+          .then(res => res.json())
+          .then(storyData => {
+            const stories: StoryScript[] = storyData.stories || [];
+            if (targetIP && stories.length > 0) {
+              const matchingStory = stories.find(s => s.ipId === targetIP!.id);
+              setStory(matchingStory || stories[0] || undefined);
+            } else if (stories.length > 0) {
+              setStory(stories[0]);
+            } else {
+              setStory(undefined);
+            }
+          })
+          .catch(console.error);
       })
       .catch(console.error);
   }, []);
@@ -149,12 +194,17 @@ function MainApp() {
     }
   };
 
-  // Handle Batch Image Rendering
+  // Handle Batch Image Rendering (Sequential Pipeline with Instant DB Persistence)
   const handleBatchRender = async () => {
     if (!story || !story.frames || story.frames.length === 0) return;
     setIsRendering(true);
-    showToast('AI 正在批量渲染分镜配图...');
+    showToast('AI 正在流水线渲染分镜配图 (实时保存，刷新不丢失)...');
 
+    const baseImage = story.baseImageUrl || currentIP?.avatarUrl || currentIP?.assets?.[0]?.url || currentIP?.turnaroundSheets?.front;
+    const stylePreset = currentIP?.stylePreset || '3D Clay';
+    const isImg2Img = Boolean(baseImage);
+
+    // Set all frames to generating in UI
     setStory(prev => {
       if (!prev) return prev;
       return {
@@ -163,88 +213,174 @@ function MainApp() {
       };
     });
 
-    try {
-      const res = await fetch('/api/render', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          frames: story.frames,
-          ipId: currentIP?.id,
-          stylePreset: currentIP?.stylePreset || '3D Clay'
-        })
-      });
+    let successCount = 0;
+    let failCount = 0;
 
-      const data = await res.json();
-      if (data.success && data.frames) {
+    for (let i = 0; i < story.frames.length; i++) {
+      const frame = story.frames[i];
+      showToast(`正在流水线渲染第 ${frame.frameNumber}/${story.frames.length} 格分镜...`);
+
+      const scenePromptEn = translateAndRefineChinesePrompt(frame.visualPrompt) || frame.visualPrompt;
+      const { promptEn } = compileDiffusionPrompt(frame.visualPrompt, currentIP, stylePreset);
+      const sceneCore = scenePromptEn.split(',')[0].trim();
+      const isStale = !frame.visualPromptEn || !frame.visualPromptEn.trim() || (sceneCore && !frame.visualPromptEn.includes(sceneCore));
+      const effectivePromptEn = isStale
+        ? (isImg2Img
+            ? `${scenePromptEn}, featuring the character from the reference image, in ${stylePreset} style, single standalone image, single frame, no split screen, no grid, no multi-panel, no comic strip, no speech bubbles, no text, 3:4 vertical portrait aspect ratio composition, expressive action scene, masterpiece, best quality`
+            : promptEn)
+        : frame.visualPromptEn;
+
+      const frameToSend = {
+        ...frame,
+        visualPromptEn: effectivePromptEn
+      };
+
+      try {
+        const res = await fetch('/api/render', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            frame: frameToSend,
+            ipId: currentIP?.id,
+            storyId: story.id,
+            stylePreset,
+            referenceImageUrl: baseImage,
+            mode: isImg2Img ? 'image-to-image' : 'text-to-image'
+          })
+        });
+
+        const data = await res.json();
+        if (data.success && data.frame && data.frame.imageUrl) {
+          const rendered = data.frame as StoryboardFrame;
+          setStory(prev => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              frames: prev.frames.map(f => f.id === frame.id ? rendered : f)
+            };
+          });
+          successCount++;
+        } else {
+          failCount++;
+          const errorMsg = data.frame?.lastError || data.error || '未产出有效画作';
+          setStory(prev => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              frames: prev.frames.map(f => f.id === frame.id ? { ...f, status: 'error', lastError: errorMsg } : f)
+            };
+          });
+        }
+      } catch (err: any) {
+        failCount++;
+        const errorMsg = err?.message || '网络连接异常';
         setStory(prev => {
           if (!prev) return prev;
-          const updated = { ...prev, frames: data.frames as StoryboardFrame[] };
-          fetch('/api/story', {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(updated)
-          }).catch(console.error);
-          return updated;
+          return {
+            ...prev,
+            frames: prev.frames.map(f => f.id === frame.id ? { ...f, status: 'error', lastError: errorMsg } : f)
+          };
         });
-        const okCount = (data.frames as StoryboardFrame[]).filter(f => f.status === 'completed' && f.imageUrl).length;
-        const failCount = (data.frames as StoryboardFrame[]).length - okCount;
-        showToast(failCount === 0
-          ? '🎉 全部分镜渲染完成！'
-          : `渲染完成：成功 ${okCount} 格，失败 ${failCount} 格（可点击失败格重试）`);
       }
-    } catch {
-      showToast('渲染失败，请重试');
-    } finally {
-      setIsRendering(false);
+    }
+
+    setIsRendering(false);
+    if (failCount === 0) {
+      showToast(`🎉 全部分镜渲染完成 (${successCount}/${story.frames.length} 格)！已自动保存。`, 'success');
+    } else {
+      showToast(
+        `流水线渲染结束：成功 ${successCount} 格，失败 ${failCount} 格`,
+        'warning',
+        '部分格出图受限，您可点击失败格卡片上的「立即重试生成」单独重试。',
+        7000
+      );
     }
   };
 
   // Handle Single Frame Rendering
   const handleSingleRender = async (frame: StoryboardFrame) => {
     if (!story) return;
-    showToast(`正在重新渲染第 ${frame.frameNumber} 格分镜...`);
+    showToast(`正在调度引擎渲染第 ${frame.frameNumber} 格分镜...`, 'info', undefined, 3000);
 
     setStory(prev => {
       if (!prev) return prev;
       return {
         ...prev,
-        frames: prev.frames.map(f => f.id === frame.id ? { ...f, status: 'generating' } : f)
+        frames: prev.frames.map(f => f.id === frame.id ? { ...f, status: 'generating', lastError: undefined } : f)
       };
     });
+
+    const baseImage = story.baseImageUrl || currentIP?.avatarUrl || currentIP?.assets?.[0]?.url || currentIP?.turnaroundSheets?.front;
+    const stylePreset = currentIP?.stylePreset || '3D Clay';
+    const isImg2Img = Boolean(baseImage);
+    const scenePromptEn = translateAndRefineChinesePrompt(frame.visualPrompt) || frame.visualPrompt;
+    const { promptEn } = compileDiffusionPrompt(frame.visualPrompt, currentIP, stylePreset);
+    
+    // Ensure we don't send stale portrait-only prompts
+    const sceneCore = scenePromptEn.split(',')[0].trim();
+    const isStale = !frame.visualPromptEn || !frame.visualPromptEn.trim() || (sceneCore && !frame.visualPromptEn.includes(sceneCore));
+    const effectivePromptEn = isStale
+      ? (isImg2Img
+          ? `${scenePromptEn}, featuring the character from the reference image, in ${stylePreset} style, single standalone image, single frame, no split screen, no grid, no multi-panel, no comic strip, no speech bubbles, no text, 3:4 vertical portrait aspect ratio composition, expressive action scene, masterpiece, best quality`
+          : promptEn)
+      : frame.visualPromptEn;
+
+    const frameToSend = {
+      ...frame,
+      visualPromptEn: effectivePromptEn
+    };
 
     try {
       const res = await fetch('/api/render', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          frame,
+          frame: frameToSend,
           ipId: currentIP?.id,
-          stylePreset: currentIP?.stylePreset || '3D Clay'
+          storyId: story.id,
+          stylePreset,
+          referenceImageUrl: baseImage,
+          mode: isImg2Img ? 'image-to-image' : 'text-to-image'
         })
       });
 
       const data = await res.json();
-      if (data.success && data.frame) {
+      if (data.success && data.frame && data.frame.imageUrl) {
         const rendered = data.frame as StoryboardFrame;
         setStory(prev => {
           if (!prev) return prev;
-          const updated = {
+          return {
             ...prev,
             frames: prev.frames.map(f => f.id === frame.id ? rendered : f)
           };
-          fetch('/api/story', {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(updated)
-          }).catch(console.error);
-          return updated;
         });
-        showToast(rendered.imageUrl
-          ? `第 ${frame.frameNumber} 格分镜重绘成功！`
-          : `第 ${frame.frameNumber} 格重绘失败，请稍后重试`);
+        showToast(`🎉 第 ${frame.frameNumber} 格分镜渲染完成！已保存。`, 'success');
+      } else {
+        const errorReason = data.frame?.lastError || data.error || '未能产出专属图片，会话已安全退出。';
+        setStory(prev => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            frames: prev.frames.map(f => f.id === frame.id ? { ...f, status: 'error', lastError: errorReason } : f)
+          };
+        });
+        showToast(
+          `第 ${frame.frameNumber} 格渲染失败`,
+          'error',
+          errorReason,
+          9000
+        );
       }
-    } catch {
-      showToast('重绘失败，请重试');
+    } catch (err: any) {
+      const errorReason = err?.message || '网络连接或服务端异常';
+      setStory(prev => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          frames: prev.frames.map(f => f.id === frame.id ? { ...f, status: 'error', lastError: errorReason } : f)
+        };
+      });
+      showToast(`第 ${frame.frameNumber} 格渲染异常`, 'error', errorReason, 9000);
     }
   };
 
@@ -263,27 +399,98 @@ function MainApp() {
   };
 
   // Save IP
-  const handleSaveIP = (savedIP: IPProfile) => {
+  const handleSaveIP = async (savedIP: IPProfile) => {
     setCurrentIP(savedIP);
+    try {
+      localStorage.setItem('ip_helper_last_selected_ip_id', savedIP.id);
+    } catch {
+      // ignore
+    }
     setAllIPs(prev => {
       const exists = prev.some(item => item.id === savedIP.id);
       return exists ? prev.map(item => item.id === savedIP.id ? savedIP : item) : [savedIP, ...prev];
     });
-    fetch('/api/ip', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(savedIP)
-    }).catch(console.error);
+    try {
+      const res = await fetch('/api/ip', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(savedIP)
+      });
+      const data = await res.json();
+      if (!data.success) {
+        showToast(`角色保存失败: ${data.error || '未知错误'}`);
+      }
+    } catch {
+      showToast('网络请求异常，角色保存可能未同步到本地');
+    }
   };
 
   // Delete IP
   const handleDeleteIP = (id: string) => {
+    if (id === 'all') {
+      setAllIPs([]);
+      setCurrentIP(undefined);
+      setStory(undefined);
+      try {
+        localStorage.removeItem('ip_helper_last_selected_ip_id');
+      } catch {}
+      fetch('/api/ip?id=all', {
+        method: 'DELETE',
+        headers: { 'x-confirm-purge': 'confirmed' }
+      }).catch(console.error);
+      showToast('已清空所有 IP 角色');
+      return;
+    }
     const remaining = allIPs.filter(item => item.id !== id);
     setAllIPs(remaining);
-    if (currentIP?.id === id && remaining.length > 0) {
-      setCurrentIP(remaining[0]);
+    if (currentIP?.id === id) {
+      const nextIP = remaining.length > 0 ? remaining[0] : undefined;
+      setCurrentIP(nextIP);
+      if (nextIP) {
+        try {
+          localStorage.setItem('ip_helper_last_selected_ip_id', nextIP.id);
+        } catch {}
+        fetch('/api/story')
+          .then(res => res.json())
+          .then(data => {
+            const match = data.stories?.find((s: StoryScript) => s.ipId === nextIP.id);
+            setStory(match || undefined);
+          })
+          .catch(() => setStory(undefined));
+      } else {
+        setStory(undefined);
+        try {
+          localStorage.removeItem('ip_helper_last_selected_ip_id');
+        } catch {}
+      }
+    } else if (story?.ipId === id) {
+      setStory(undefined);
     }
     fetch(`/api/ip?id=${id}`, { method: 'DELETE' }).catch(console.error);
+  };
+
+  // Select Active IP
+  const handleSelectIP = (ip: IPProfile) => {
+    setCurrentIP(ip);
+    try {
+      localStorage.setItem('ip_helper_last_selected_ip_id', ip.id);
+    } catch {
+      // ignore
+    }
+    fetch('/api/story')
+      .then(res => res.json())
+      .then(data => {
+        const match = data.stories?.find((s: StoryScript) => s.ipId === ip.id);
+        if (match) {
+          setStory(match);
+        } else {
+          // If no story exists for this IP yet, generate a default one and persist
+          const newStory = generateStoryboardForIP(ip, `${ip.name}的日常抓马翻车`, locale);
+          setStory(newStory);
+          persistNewStory(newStory);
+        }
+      })
+      .catch(() => setStory(undefined));
   };
 
   // Persist a freshly generated story (fire-and-forget with feedback on failure)
@@ -301,13 +508,33 @@ function MainApp() {
   };
 
   // Transition from Character Manager to Story Studio
-  const handleGoToStoryStudio = (ip: IPProfile) => {
+  const handleGoToStoryStudio = async (ip: IPProfile) => {
     setCurrentIP(ip);
-    // Dynamically generate a fresh story for this character if needed
-    const newStory = generateStoryboardForIP(ip, `${ip.name}的日常抓马翻车`, locale);
-    setStory(newStory);
-    persistNewStory(newStory);
-    setActiveView('studio');
+    try {
+      localStorage.setItem('ip_helper_last_selected_ip_id', ip.id);
+    } catch {}
+
+    // Check if a story already exists for this IP before generating a fresh one to prevent data loss!
+    try {
+      const res = await fetch('/api/story');
+      const data = await res.json();
+      const existingStory = data.stories?.find((s: StoryScript) => s.ipId === ip.id);
+      if (existingStory) {
+        setStory(existingStory);
+      } else {
+        const newStory = generateStoryboardForIP(ip, `${ip.name}的日常抓马翻车`, locale);
+        setStory(newStory);
+        persistNewStory(newStory);
+      }
+    } catch {
+      if (!story || story.ipId !== ip.id) {
+        const newStory = generateStoryboardForIP(ip, `${ip.name}的日常抓马翻车`, locale);
+        setStory(newStory);
+        persistNewStory(newStory);
+      }
+    }
+
+    handleSwitchView('studio');
     showToast(`已切换至【${ip.name}】故事创作工坊`);
   };
 
@@ -324,10 +551,10 @@ function MainApp() {
       {/* Top Global Navigation Bar */}
       <Header
         activeView={activeView}
-        onSwitchView={setActiveView}
+        onSwitchView={handleSwitchView}
         currentIP={currentIP}
         allIPs={allIPs}
-        onSelectIP={setCurrentIP}
+        onSelectIP={handleSelectIP}
         onOpenSkills={() => setIsSkillsModalOpen(true)}
         onOpenModelSettings={() => setIsModelSettingsOpen(true)}
         skills={skills}
@@ -342,7 +569,7 @@ function MainApp() {
           <CharacterManager
             ips={allIPs}
             currentIP={currentIP}
-            onSelectIP={setCurrentIP}
+            onSelectIP={handleSelectIP}
             onSaveIP={handleSaveIP}
             onDeleteIP={handleDeleteIP}
             onGoToStoryStudio={handleGoToStoryStudio}
@@ -352,18 +579,17 @@ function MainApp() {
           <StoryStudio
             currentIP={currentIP}
             allIPs={allIPs}
-            onSelectIP={setCurrentIP}
+            onSelectIP={handleSelectIP}
             story={story}
             onUpdateStory={handleUpdateStory}
-            onSetStory={(newStory: StoryScript) => {
+            onSetStory={(newStory?: StoryScript) => {
               setStory(newStory);
-              persistNewStory(newStory);
+              if (newStory) {
+                persistNewStory(newStory);
+              }
             }}
             skills={skills}
             activeSkillIds={activeSkillIds}
-            chatMessages={chatMessages}
-            onSendMessage={handleSendMessage}
-            isChatLoading={isChatLoading}
             onShowToast={showToast}
             onBatchRender={handleBatchRender}
             onSingleRender={handleSingleRender}
@@ -390,11 +616,41 @@ function MainApp() {
         onToggleSkill={handleToggleSkill}
       />
 
-      {/* Toast Notification Floating Pill */}
-      {toastMessage && (
-        <div className="fixed bottom-6 right-6 z-50 px-4 py-2.5 rounded-xl bg-zinc-900/95 border border-violet-500/50 shadow-2xl text-xs font-semibold text-zinc-100 flex items-center gap-2 animate-in fade-in slide-in-from-bottom-3 duration-200">
-          <span className="w-2 h-2 rounded-full bg-violet-400 animate-ping" />
-          {toastMessage}
+      {/* Toast Notification Floating Card */}
+      {toastInfo && (
+        <div
+          className={`fixed bottom-6 right-6 z-50 max-w-sm w-auto px-4 py-3 rounded-2xl backdrop-blur-md shadow-2xl flex items-start gap-3 animate-in fade-in slide-in-from-bottom-3 duration-200 border ${
+            toastInfo.type === 'error'
+              ? 'bg-rose-950/90 border-rose-500/60 text-rose-100 shadow-rose-950/40'
+              : toastInfo.type === 'warning'
+              ? 'bg-amber-950/90 border-amber-500/60 text-amber-100 shadow-amber-950/40'
+              : toastInfo.type === 'success'
+              ? 'bg-emerald-950/90 border-emerald-500/60 text-emerald-100 shadow-emerald-950/40'
+              : 'bg-zinc-900/95 border-violet-500/50 text-zinc-100 shadow-black/40'
+          }`}
+        >
+          <div className="flex-shrink-0 mt-0.5">
+            {toastInfo.type === 'error' && <AlertCircle className="w-4 h-4 text-rose-400" />}
+            {toastInfo.type === 'warning' && <AlertTriangle className="w-4 h-4 text-amber-400" />}
+            {toastInfo.type === 'success' && <CheckCircle2 className="w-4 h-4 text-emerald-400" />}
+            {toastInfo.type === 'info' && <Info className="w-4 h-4 text-violet-400" />}
+          </div>
+
+          <div className="flex-1 min-w-0 pr-1">
+            <div className="text-xs font-semibold leading-snug">{toastInfo.message}</div>
+            {toastInfo.detail && (
+              <div className="text-[10px] text-zinc-300/80 mt-1 font-mono leading-relaxed break-words bg-black/30 p-1.5 rounded-lg border border-white/5">
+                {toastInfo.detail}
+              </div>
+            )}
+          </div>
+
+          <button
+            onClick={() => setToastInfo(null)}
+            className="flex-shrink-0 p-1 rounded-lg hover:bg-white/10 text-zinc-400 hover:text-white transition-colors cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
         </div>
       )}
     </div>

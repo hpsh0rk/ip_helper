@@ -6,6 +6,7 @@ import { translateAndRefineChinesePrompt } from '@/lib/i18n/promptTranslator';
 const BRAIN_DIR = process.env.AGY_BRAIN_DIR || path.join(process.env.HOME || '', '.gemini/antigravity-cli/brain');
 const AGY_BIN = process.env.AGY_BIN || path.join(process.env.HOME || '', '.local/bin/agy');
 const LOGS_DIR = path.join(process.cwd(), 'data', 'logs');
+const CLI_TIMEOUT_MS = Number(process.env.AGY_TIMEOUT_MS) || 300000; // 5 minutes default (300s), matching agy print-timeout
 
 export interface TraceLogItem {
   timestamp: string;
@@ -77,10 +78,51 @@ export function getDiagnosticLog(logId: string) {
 }
 
 /**
- * Executes a single image generation via local Antigravity CLI (agy -p)
- * Supports text-to-image and image-to-image (reference image derivation)
+ * Global FIFO rendering queue to serialize local CLI calls
+ * and prevent concurrent process race conditions and rate limits.
  */
-async function generateSingleImageCli(
+let renderQueueChain: Promise<any> = Promise.resolve();
+
+function enqueueRenderJob<T>(job: () => Promise<T>): Promise<T> {
+  const next = renderQueueChain.then(() => job(), () => job());
+  renderQueueChain = next.catch(() => {});
+  return next;
+}
+
+/**
+ * Extracts distinctive core action/scene keywords from a prompt
+ * to verify that a conversation transcript genuinely belongs to this specific frame.
+ */
+function extractPromptKeywords(prompt: string): string[] {
+  const commonTokens = new Set([
+    'character', 'main', 'masterpiece', 'quality', 'resolution', 'image', 'frame',
+    'style', 'claymation', 'single', 'standalone', 'portrait', 'aspect', 'ratio',
+    'vertical', 'render', 'wholesome', 'super', 'cute', 'best', 'lighting',
+    'textures', 'diorama', 'studio', 'view', 'full', 'visible', 'expressive'
+  ]);
+
+  return prompt
+    .toLowerCase()
+    .replace(/[^\w\u4e00-\u9fa5\s]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length >= 3 && !commonTokens.has(w))
+    .slice(0, 12);
+}
+
+function verifyTranscriptPromptMatch(transcriptContent: string, keywords: string[]): { matched: boolean; score: number; matchedWords: string[] } {
+  if (keywords.length === 0) return { matched: true, score: 1, matchedWords: [] };
+  const lowerTranscript = transcriptContent.toLowerCase();
+  const matchedWords = keywords.filter(k => lowerTranscript.includes(k));
+  const score = matchedWords.length / keywords.length;
+  // Require at least 2 distinct keywords or >= 35% match
+  const matched = matchedWords.length >= Math.min(2, Math.ceil(keywords.length * 0.35));
+  return { matched, score, matchedWords };
+}
+
+/**
+ * Internal single image generation execution (guaranteed serialized via queue)
+ */
+async function executeSingleImageCliInternal(
   refinedPrompt: string,
   index: number = 1,
   referenceImageUrl?: string
@@ -96,9 +138,10 @@ async function generateSingleImageCli(
 }> {
   const startTime = Date.now();
   const logs: TraceLogItem[] = [];
+  const promptKeywords = extractPromptKeywords(refinedPrompt);
 
   // Fast path for test environment
-  if (typeof process !== 'undefined' && process.env?.NODE_ENV === 'test') {
+  if (typeof process !== 'undefined' && (process.env?.NODE_ENV === 'test' || Boolean(process.env?.VITEST))) {
     const dummySvg = `<svg xmlns="http://www.w3.org/2000/svg" width="450" height="600"><rect width="100%" height="100%" fill="#18181b"/><text x="50%" y="50%" fill="#a1a1aa" font-size="20" text-anchor="middle">Test Mock Image ${index}</text></svg>`;
     logs.push({
       timestamp: new Date().toISOString(),
@@ -117,7 +160,7 @@ async function generateSingleImageCli(
   let tempRefPath: string | null = null;
   if (referenceImageUrl) {
     try {
-      const storageDir = path.join(BRAIN_DIR, '.tempmediaStorage');
+      const storageDir = path.join(process.cwd(), 'data', '.tempmedia');
       if (!fs.existsSync(storageDir)) {
         fs.mkdirSync(storageDir, { recursive: true });
       }
@@ -148,10 +191,27 @@ async function generateSingleImageCli(
     }
   }
 
-  const beforeTime = Date.now() - 3000;
+  // Pre-launch brain directory snapshot to prevent cross-session ambiguity
+  const preExistingConvs = new Set<string>();
+  try {
+    if (fs.existsSync(BRAIN_DIR)) {
+      fs.readdirSync(BRAIN_DIR).forEach(name => preExistingConvs.add(name));
+    }
+  } catch {
+    // ignore
+  }
+
+  const beforeTime = Date.now() - 2000;
   const safePrompt = refinedPrompt.replace(/"/g, '\\"').slice(0, 1000);
   const refParam = tempRefPath ? `, ImagePaths: [\\"${tempRefPath}\\"]` : '';
-  const command = `${AGY_BIN} -p "Please call tool generate_image with prompt: ${safePrompt}${refParam}" --dangerously-skip-permissions`;
+  const command = `${AGY_BIN} -p "Please call tool generate_image with prompt: ${safePrompt}${refParam}" --print-timeout 300s --dangerously-skip-permissions`;
+
+  logs.push({
+    timestamp: new Date().toISOString(),
+    step: 'PROMPT_SIGNATURE',
+    message: `[图${index}] 提取特征关键词: [${promptKeywords.slice(0, 6).join(', ')}]，用于会话专属绑定与防串格校验`,
+    status: 'info'
+  });
 
   logs.push({
     timestamp: new Date().toISOString(),
@@ -164,7 +224,7 @@ async function generateSingleImageCli(
     let stdoutData = '';
     let stderrData = '';
 
-    const proc = exec(command, { timeout: 120000 }, (error) => {
+    const proc = exec(command, { timeout: CLI_TIMEOUT_MS }, (error) => {
       const elapsedMs = Date.now() - startTime;
       let matchedConvId: string | undefined;
       let modelFeedback: string | undefined;
@@ -180,14 +240,14 @@ async function generateSingleImageCli(
         });
       }
 
-      // 1. Direct Regex match from stdout
+      // 1. Direct Regex match from stdout for explicitly printed image path
       const match = stdoutData.match(/Generated image is saved at\s+([^\s]+\.(?:jpg|png|webp|jpeg))/i);
-      if (match && fs.existsSync(match[1])) {
+      if (match && fs.existsSync(match[1]) && !path.basename(match[1]).startsWith('ref_')) {
         const filePath = match[1];
         logs.push({
           timestamp: new Date().toISOString(),
           step: 'IMAGE_MATCH_STDOUT',
-          message: `[图${index}] 从 CLI 日志中精准捕获产物路径: ${path.basename(filePath)}`,
+          message: `[图${index}] 从 CLI 输出中精准捕获产物: ${path.basename(filePath)}`,
           status: 'success',
           elapsedMs
         });
@@ -200,59 +260,82 @@ async function generateSingleImageCli(
         });
       }
 
-      // 2. Scan recent conversation directories in brain
+      // 2. Extract specific Conversation ID from stdout/stderr to isolate session
+      const convIdMatch = (stdoutData + stderrData).match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+      if (convIdMatch) {
+        matchedConvId = convIdMatch[1];
+      }
+
+      // 3. Scan and strictly verify candidate conversation directories
       try {
         if (fs.existsSync(BRAIN_DIR)) {
-          const convs = fs.readdirSync(BRAIN_DIR).map(name => {
+          const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+          // List candidates: ONLY valid UUID conversation directories (exclude .tempmediaStorage and hidden folders)
+          const candidateConvs = fs.readdirSync(BRAIN_DIR).map(name => {
+            if (!UUID_REGEX.test(name)) return null;
             const fullPath = path.join(BRAIN_DIR, name);
             try {
-              return { name, path: fullPath, stat: fs.statSync(fullPath) };
+              return { 
+                name, 
+                path: fullPath, 
+                stat: fs.statSync(fullPath),
+                isNew: !preExistingConvs.has(name)
+              };
             } catch {
               return null;
             }
-          }).filter((item): item is { name: string; path: string; stat: fs.Stats } => 
-            item !== null && item.stat.isDirectory() && item.stat.mtimeMs >= beforeTime
-          ).sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
+          }).filter((item): item is { name: string; path: string; stat: fs.Stats; isNew: boolean } => 
+            item !== null && item.stat.isDirectory() && (item.isNew || item.stat.mtimeMs >= beforeTime)
+          ).sort((a, b) => {
+            // Prioritize explicitly matched convId, then newly created convs, then mtime
+            if (matchedConvId && a.name === matchedConvId) return -1;
+            if (matchedConvId && b.name === matchedConvId) return 1;
+            if (a.isNew !== b.isNew) return a.isNew ? -1 : 1;
+            return b.stat.mtimeMs - a.stat.mtimeMs;
+          });
 
-          if (convs.length > 0) {
-            matchedConvId = convs[0].name;
-            const conv = convs[0];
-
-            // 2.1 Check if image file exists
-            try {
-              const files = fs.readdirSync(conv.path);
-              for (const file of files) {
-                if (file.endsWith('.jpg') || file.endsWith('.png')) {
-                  const filePath = path.join(conv.path, file);
-                  const stat = fs.statSync(filePath);
-                  if (stat.mtimeMs >= beforeTime) {
-                    logs.push({
-                      timestamp: new Date().toISOString(),
-                      step: 'IMAGE_MATCH_SCAN',
-                      message: `[图${index}] 捕获最新渲染产物: ${file} (会话 ID: ${conv.name.slice(0, 8)})`,
-                      status: 'success',
-                      elapsedMs
-                    });
-                    const buf = fs.readFileSync(filePath);
-                    return resolve({
-                      imageUrl: `data:image/jpeg;base64,${buf.toString('base64')}`,
-                      convId: conv.name,
-                      logs,
-                      stdoutData,
-                      stderrData
-                    });
-                  }
+          for (const cand of candidateConvs) {
+            const transcriptPath = path.join(cand.path, '.system_generated', 'logs', 'transcript.jsonl');
+            if (fs.existsSync(transcriptPath)) {
+              try {
+                const transcriptContent = fs.readFileSync(transcriptPath, 'utf-8');
+                
+                // CRUCIAL: Verify prompt signature to prevent stealing another frame's image!
+                const verification = verifyTranscriptPromptMatch(transcriptContent, promptKeywords);
+                if (!verification.matched && candidateConvs.length > 1) {
+                  logs.push({
+                    timestamp: new Date().toISOString(),
+                    step: 'CONV_SIGNATURE_MISMATCH',
+                    message: `[图${index}] 排除会话 ${cand.name.slice(0, 8)}: Prompt 特征不吻合 (命中: [${verification.matchedWords.join(', ')}])`,
+                    status: 'info'
+                  });
+                  continue;
                 }
-              }
-            } catch {
-              // skip
-            }
 
-            // 2.2 Deep inspect transcript.jsonl for explicit model reasons (429, safety, quota, etc.)
-            try {
-              const transcriptPath = path.join(conv.path, '.system_generated', 'logs', 'transcript.jsonl');
-              if (fs.existsSync(transcriptPath)) {
-                const lines = fs.readFileSync(transcriptPath, 'utf-8').trim().split('\n');
+                // Check image explicitly recorded in transcript
+                const pathInTranscript = transcriptContent.match(/Generated image is saved at\s+([^\s]+\.(?:jpg|png|webp|jpeg))/i);
+                if (pathInTranscript && fs.existsSync(pathInTranscript[1]) && !path.basename(pathInTranscript[1]).startsWith('ref_')) {
+                  const filePath = pathInTranscript[1];
+                  logs.push({
+                    timestamp: new Date().toISOString(),
+                    step: 'IMAGE_MATCH_TRANSCRIPT',
+                    message: `[图${index}] 经特征签名验证，确认专属产物: ${path.basename(filePath)} (会话: ${cand.name.slice(0, 8)})`,
+                    status: 'success',
+                    elapsedMs
+                  });
+                  const buf = fs.readFileSync(filePath);
+                  return resolve({
+                    imageUrl: `data:image/jpeg;base64,${buf.toString('base64')}`,
+                    convId: cand.name,
+                    logs,
+                    stdoutData,
+                    stderrData
+                  });
+                }
+
+                // Check model feedback in transcript for explicit errors
+                const lines = transcriptContent.trim().split('\n');
                 for (let i = lines.length - 1; i >= 0; i--) {
                   try {
                     const stepObj = JSON.parse(lines[i]);
@@ -276,6 +359,38 @@ async function generateSingleImageCli(
                     // skip
                   }
                 }
+              } catch {
+                // skip
+              }
+            }
+
+            // Check image file in candidate dir root (exclude reference images)
+            try {
+              const files = fs.readdirSync(cand.path);
+              for (const file of files) {
+                const lower = file.toLowerCase();
+                if (lower.startsWith('ref_') || lower.startsWith('.')) continue;
+                if (lower.endsWith('.jpg') || lower.endsWith('.png') || lower.endsWith('.jpeg') || lower.endsWith('.webp')) {
+                  const filePath = path.join(cand.path, file);
+                  const stat = fs.statSync(filePath);
+                  if (stat.mtimeMs >= beforeTime) {
+                    logs.push({
+                      timestamp: new Date().toISOString(),
+                      step: 'IMAGE_MATCH_SCAN',
+                      message: `[图${index}] 捕获会话专属渲染产物: ${file} (会话: ${cand.name.slice(0, 8)})`,
+                      status: 'success',
+                      elapsedMs
+                    });
+                    const buf = fs.readFileSync(filePath);
+                    return resolve({
+                      imageUrl: `data:image/jpeg;base64,${buf.toString('base64')}`,
+                      convId: cand.name,
+                      logs,
+                      stdoutData,
+                      stderrData
+                    });
+                  }
+                }
               }
             } catch {
               // skip
@@ -286,7 +401,7 @@ async function generateSingleImageCli(
         // ignore scan errors
       }
 
-      // 3. Construct specific diagnostic information
+      // 4. Construct specific diagnostic advice if no image was produced
       if (modelFeedback) {
         if (
           modelFeedback.includes('429') ||
@@ -294,7 +409,7 @@ async function generateSingleImageCli(
           modelFeedback.includes('配额') ||
           modelFeedback.includes('Too Many Requests')
         ) {
-          diagnosticAdvice = '上游生图模型配额超限 (429 Too Many Requests / RESOURCE_EXHAUSTED)。通常为 API 临时调用量用尽，预计在 1~2 小时后自动重置配额。';
+          diagnosticAdvice = '上游生图模型配额超限 (429 Too Many Requests / RESOURCE_EXHAUSTED)。预计在稍后自动恢复。';
           logs.push({
             timestamp: new Date().toISOString(),
             step: 'QUOTA_EXHAUSTED',
@@ -313,10 +428,16 @@ async function generateSingleImageCli(
           });
         }
       } else {
+        const isTimeout = error && (error.killed || (error as any).signal === 'SIGTERM' || elapsedMs >= CLI_TIMEOUT_MS - 2000);
+        if (isTimeout) {
+          diagnosticAdvice = `生成超时：上游生图模型排队或网络响应较长(${(CLI_TIMEOUT_MS / 1000).toFixed(0)}s)，本次会话未产出独立图片。`;
+        } else {
+          diagnosticAdvice = '未在预期时间内捕获到当前分镜的专属图片产物，已严格阻断跨会话复用。请点击重试生成。';
+        }
         logs.push({
           timestamp: new Date().toISOString(),
           step: 'CLI_NO_OUTPUT',
-          message: `[图${index}] 未在预期时间内捕获到生成的图片文件 (耗时 ${(elapsedMs / 1000).toFixed(1)}s)`,
+          message: `[图${index}] ${diagnosticAdvice}`,
           status: 'error',
           elapsedMs
         });
@@ -344,6 +465,26 @@ async function generateSingleImageCli(
 }
 
 /**
+ * Public function to execute single image CLI (enqueued to prevent concurrency issues)
+ */
+async function generateSingleImageCli(
+  refinedPrompt: string,
+  index: number = 1,
+  referenceImageUrl?: string
+): Promise<{ 
+  imageUrl: string; 
+  logs: TraceLogItem[]; 
+  convId?: string;
+  error?: string; 
+  modelFeedback?: string;
+  diagnosticAdvice?: string;
+  stdoutData?: string;
+  stderrData?: string;
+}> {
+  return enqueueRenderJob(() => executeSingleImageCliInternal(refinedPrompt, index, referenceImageUrl));
+}
+
+/**
  * Server-only module to execute real image generation via Antigravity CLI (agy -p)
  * Supports single & multi-image batch generation, text-to-image and image-to-image reference derivation,
  * and structured Log ID tracking for agent troubleshooting
@@ -361,8 +502,15 @@ export async function generateImageViaServerCli(
   const randomSuffix = Math.random().toString(36).substring(2, 6).toUpperCase();
   let logId = `LOG-${dateStr}-${randomSuffix}`;
 
-  // Step 1: Semantic Purification
-  const refinedPrompt = translateAndRefineChinesePrompt(prompt);
+  // Step 1: Semantic Purification (preserving pre-compiled English prompts)
+  let refinedPrompt = prompt.trim();
+  if (!refinedPrompt.includes('masterpiece') && !refinedPrompt.includes('best quality') && !refinedPrompt.includes('featuring the character')) {
+    refinedPrompt = translateAndRefineChinesePrompt(prompt);
+  }
+  if (!refinedPrompt.includes('no split screen')) {
+    refinedPrompt += ', single standalone image, single frame, no split screen, no grid, no multi-panel, no comic strip, no speech bubbles, no text';
+  }
+
   traceLogs.push({
     timestamp: new Date().toISOString(),
     step: 'PROMPT_COMPILE',
@@ -465,7 +613,7 @@ export async function generateImageViaServerCli(
     refinedPrompt,
     traceLogs,
     error: isSuccess ? undefined : (detectedModelFeedback ? `上游服务响应异常: ${detectedModelFeedback.split('\n')[0]}` : '生成超时或环境未产出图片'),
-    diagnosticAdvice: detectedAdvice || (isSuccess ? undefined : '建议检查本地 agy 权限或稍后重试。'),
+    diagnosticAdvice: detectedAdvice || (isSuccess ? undefined : '建议稍后重试，或检查网络连接。'),
     modelFeedback: detectedModelFeedback
   };
 

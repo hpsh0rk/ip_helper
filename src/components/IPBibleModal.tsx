@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useI18n } from '@/lib/i18n/context';
 import { IPProfile, StylePreset } from '@/types';
 import { X, Sparkles, Sliders, Palette, Image as ImageIcon, Save, ArrowRight } from 'lucide-react';
@@ -32,7 +32,19 @@ export function IPBibleModal({
   onSelectAndStartStory
 }: IPBibleModalProps) {
   const { t } = useI18n();
-  const [selectedIP, setSelectedIP] = useState<IPProfile>(currentIP || ips[0]);
+  const [selectedIP, setSelectedIP] = useState<IPProfile | null>(currentIP || (ips.length > 0 ? ips[0] : null));
+
+  useEffect(() => {
+    if (currentIP) {
+      setSelectedIP(currentIP);
+    } else if (ips.length > 0) {
+      if (!selectedIP || !ips.some(ip => ip.id === selectedIP.id)) {
+        setSelectedIP(ips[0]);
+      }
+    } else {
+      setSelectedIP(null);
+    }
+  }, [currentIP, ips]);
 
   if (!isOpen) return null;
 
@@ -89,29 +101,39 @@ export function IPBibleModal({
               角色列表
             </span>
 
-            <div className="space-y-1.5">
-              {ips.map((ip) => (
-                <div
-                  key={ip.id}
-                  onClick={() => setSelectedIP(ip)}
-                  className={`flex items-center gap-3 p-2.5 rounded-xl cursor-pointer transition-all ${
-                    selectedIP?.id === ip.id
-                      ? 'bg-violet-600/20 border border-violet-500/50 text-white shadow-md'
-                      : 'hover:bg-zinc-800/80 text-zinc-300 border border-transparent'
-                  }`}
-                >
-                  <img
-                    src={ip.avatarUrl}
-                    alt={ip.name}
-                    className="w-10 h-10 rounded-full object-cover border border-zinc-700"
-                  />
-                  <div className="truncate">
-                    <p className="font-bold text-xs truncate">{ip.name}</p>
-                    <p className="text-[11px] text-zinc-400 truncate">{ip.archetype}</p>
+            {ips.length === 0 ? (
+              <p className="text-xs text-zinc-500 py-6 text-center">暂无角色档案</p>
+            ) : (
+              <div className="space-y-1.5">
+                {ips.map((ip) => (
+                  <div
+                    key={ip.id}
+                    onClick={() => setSelectedIP(ip)}
+                    className={`flex items-center gap-3 p-2.5 rounded-xl cursor-pointer transition-all ${
+                      selectedIP?.id === ip.id
+                        ? 'bg-violet-600/20 border border-violet-500/50 text-white shadow-md'
+                        : 'hover:bg-zinc-800/80 text-zinc-300 border border-transparent'
+                    }`}
+                  >
+                    {ip.avatarUrl ? (
+                      <img
+                        src={ip.avatarUrl}
+                        alt={ip.name}
+                        className="w-10 h-10 rounded-full object-cover border border-zinc-700"
+                      />
+                    ) : (
+                      <div className="w-10 h-10 rounded-full bg-violet-800/40 border border-zinc-700 flex items-center justify-center font-bold text-violet-300 flex-shrink-0 text-xs">
+                        {ip.name ? ip.name.slice(0, 1) : 'IP'}
+                      </div>
+                    )}
+                    <div className="truncate">
+                      <p className="font-bold text-xs truncate">{ip.name}</p>
+                      <p className="text-[11px] text-zinc-400 truncate">{ip.archetype}</p>
+                    </div>
                   </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
 
             {selectedIP && (
               <div className="pt-4 border-t border-zinc-800 space-y-3 text-xs">
@@ -160,7 +182,7 @@ export function IPBibleModal({
           </div>
 
           {/* Right Column: Visual Anchors, Turnarounds, Style Presets */}
-          {selectedIP && (
+          {selectedIP ? (
             <div className="flex-1 p-6 space-y-6 overflow-y-auto">
               {/* Visual Anchors */}
               <div className="space-y-3">
@@ -240,27 +262,45 @@ export function IPBibleModal({
 
                 <div className="grid grid-cols-3 gap-3">
                   <div className="rounded-xl bg-zinc-950 border border-zinc-800 p-2 text-center space-y-1.5">
-                    <img
-                      src={selectedIP.avatarUrl}
-                      alt="front"
-                      className="aspect-[3/4] w-full object-cover rounded-lg"
-                    />
+                    {selectedIP.avatarUrl ? (
+                      <img
+                        src={selectedIP.avatarUrl}
+                        alt="front"
+                        className="aspect-[3/4] w-full object-cover rounded-lg"
+                      />
+                    ) : (
+                      <div className="aspect-[3/4] w-full bg-zinc-900 rounded-lg flex items-center justify-center text-zinc-500 text-xs">
+                        暂无头像
+                      </div>
+                    )}
                     <span className="text-[10px] text-zinc-400 font-medium">{t.bible.front} (正视)</span>
                   </div>
                   <div className="rounded-xl bg-zinc-950 border border-zinc-800 p-2 text-center space-y-1.5">
-                    <img
-                      src="https://images.unsplash.com/photo-1533738363-b7f9aef128ce?w=400&auto=format&fit=crop&q=80"
-                      alt="side"
-                      className="aspect-[3/4] w-full object-cover rounded-lg"
-                    />
+                    {selectedIP.turnaroundSheets?.side ? (
+                      <img
+                        src={selectedIP.turnaroundSheets.side}
+                        alt="side"
+                        className="aspect-[3/4] w-full object-cover rounded-lg"
+                      />
+                    ) : (
+                      <div className="aspect-[3/4] w-full bg-zinc-900 rounded-lg flex items-center justify-center text-zinc-500 text-xs">
+                        暂无侧视
+                      </div>
+                    )}
                     <span className="text-[10px] text-zinc-400 font-medium">{t.bible.side} (侧视)</span>
                   </div>
                   <div className="rounded-xl bg-zinc-950 border border-zinc-800 p-2 text-center space-y-1.5">
-                    <img
-                      src="https://images.unsplash.com/photo-1573865526739-10659fec78a5?w=400&auto=format&fit=crop&q=80"
-                      alt="back"
-                      className="aspect-[3/4] w-full object-cover rounded-lg"
-                    />
+                    {selectedIP.turnaroundSheets?.back ? (
+                      <img
+                        src={selectedIP.turnaroundSheets.back}
+                        alt="back"
+                        className="aspect-[3/4] w-full object-cover rounded-lg"
+                      />
+                    ) : (
+                      <div className="aspect-[3/4] w-full bg-zinc-900 rounded-lg flex items-center justify-center text-zinc-500 text-xs">
+                        暂无后视
+                      </div>
+                    )}
                     <span className="text-[10px] text-zinc-400 font-medium">{t.bible.back} (后视)</span>
                   </div>
                 </div>
@@ -335,6 +375,13 @@ export function IPBibleModal({
                   </div>
                 </div>
               </div>
+            </div>
+          ) : (
+            <div className="flex-1 flex flex-col items-center justify-center p-8 text-center text-zinc-500 text-xs">
+              <div className="w-12 h-12 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center text-zinc-600 mb-2">
+                <Sparkles className="w-5 h-5" />
+              </div>
+              <p>暂无选中的 IP 角色设定</p>
             </div>
           )}
         </div>

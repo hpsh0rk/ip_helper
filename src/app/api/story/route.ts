@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getStories, getStoryById, saveStory, getIPById } from '@/lib/db/fileDb.server';
+import { getStories, getStoryById, saveStory, deleteStory, clearAllStories, getIPById } from '@/lib/db/fileDb.server';
 import { generateStoryboardForIP } from '@/lib/agent/engine';
 
 export async function GET(req: NextRequest) {
@@ -56,6 +56,32 @@ export async function PUT(req: NextRequest) {
 
     const updated = saveStory(body);
     return NextResponse.json({ success: true, story: updated });
+  } catch (error: unknown) {
+    const errorMsg = error instanceof Error ? error.message : 'Unknown error';
+    return NextResponse.json({ success: false, error: errorMsg }, { status: 500 });
+  }
+}
+
+export async function DELETE(req: NextRequest) {
+  try {
+    const { searchParams } = new URL(req.url);
+    const id = searchParams.get('id');
+
+    if (id === 'all') {
+      const confirm = req.headers.get('x-confirm-purge');
+      if (confirm !== 'confirmed') {
+        return NextResponse.json({ success: false, error: 'Mass deletion requires explicit confirmation header' }, { status: 403 });
+      }
+      const ok = clearAllStories();
+      return NextResponse.json({ success: ok });
+    }
+
+    if (!id) {
+      return NextResponse.json({ success: false, error: 'Story ID or id=all is required' }, { status: 400 });
+    }
+
+    const deleted = deleteStory(id);
+    return NextResponse.json({ success: deleted });
   } catch (error: unknown) {
     const errorMsg = error instanceof Error ? error.message : 'Unknown error';
     return NextResponse.json({ success: false, error: errorMsg }, { status: 500 });

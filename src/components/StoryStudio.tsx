@@ -1,9 +1,8 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useI18n } from '@/lib/i18n/context';
-import { IPProfile, StoryScript, StoryboardFrame, Skill, ChatMessage } from '@/types';
-import { AIChatPane } from '@/components/AIChatPane';
+import { IPProfile, StoryScript, StoryboardFrame, Skill } from '@/types';
 import { StoryboardCanvas } from '@/components/StoryboardCanvas';
 import { XhsPreviewPane } from '@/components/XhsPreviewPane';
 import { generateSuggestedTopicsForIP, generateStoryboardForIP } from '@/lib/agent/engine';
@@ -15,13 +14,15 @@ interface StoryStudioProps {
   onSelectIP: (ip: IPProfile) => void;
   story?: StoryScript;
   onUpdateStory: (updates: Partial<StoryScript>) => void;
-  onSetStory: (story: StoryScript) => void;
+  onSetStory: (story: StoryScript | undefined) => void;
   skills: Skill[];
   activeSkillIds: string[];
-  chatMessages: ChatMessage[];
-  onSendMessage: (msg: string) => void;
-  isChatLoading: boolean;
-  onShowToast: (msg: string) => void;
+  onShowToast: (
+    msg: string,
+    type?: 'success' | 'error' | 'info' | 'warning',
+    detail?: string,
+    duration?: number
+  ) => void;
   onBatchRender: () => void;
   onSingleRender: (frame: StoryboardFrame) => void;
   isRendering: boolean;
@@ -36,9 +37,6 @@ export function StoryStudio({
   onSetStory,
   skills,
   activeSkillIds,
-  chatMessages,
-  onSendMessage,
-  isChatLoading,
   onShowToast,
   onBatchRender,
   onSingleRender,
@@ -49,9 +47,20 @@ export function StoryStudio({
   const [showIPMenu, setShowIPMenu] = useState(false);
   const [customTopic, setCustomTopic] = useState('');
 
+  // Keep selectedFrameId in sync with story frames
+  useEffect(() => {
+    if (story?.frames && story.frames.length > 0) {
+      if (!selectedFrameId || !story.frames.some(f => f.id === selectedFrameId)) {
+        setSelectedFrameId(story.frames[0].id);
+      }
+    } else {
+      setSelectedFrameId(undefined);
+    }
+  }, [story]);
+
   const suggestedTopics = currentIP
     ? generateSuggestedTopicsForIP(currentIP, locale)
-    : ['咖啡馆打翻奶泡大翻车', '雨夜极速送外卖', '偷偷减肥半夜破功'];
+    : ['日常搞笑翻车瞬间', '第一次尝试新挑战', '温馨治愈周末时光'];
 
   const handleGenerateTopicStory = (topicStr: string) => {
     if (!currentIP) {
@@ -90,7 +99,7 @@ export function StoryStudio({
       visualPromptEn: `Character in scene continuation, anime aesthetic, 3:4 portrait`,
       narration: '故事新进展...',
       dialogue: `${currentIP?.name || '角色'}："又有新发现了！"`,
-      imageUrl: currentIP?.avatarUrl || 'https://images.unsplash.com/photo-1514888286974-6c03e2ca1dba?w=600&auto=format&fit=crop&q=80',
+      imageUrl: currentIP?.avatarUrl || '',
       isCover: false,
       status: 'completed'
     };
@@ -98,6 +107,16 @@ export function StoryStudio({
     onUpdateStory({ frames: [...story.frames, newFrame] });
     setSelectedFrameId(newFrame.id);
     onShowToast(`已添加第 ${newNum} 格分镜`);
+  };
+
+  const handleResetStory = () => {
+    if (!story) return;
+    if (window.confirm('确定要清空当前分镜故事吗？此操作不可恢复。')) {
+      const storyId = story.id;
+      onSetStory(undefined);
+      fetch(`/api/story?id=${storyId}`, { method: 'DELETE' }).catch(console.error);
+      onShowToast('已清空当前分镜故事');
+    }
   };
 
   return (
@@ -113,11 +132,17 @@ export function StoryStudio({
             >
               {currentIP ? (
                 <>
-                  <img
-                    src={currentIP.avatarUrl}
-                    alt={currentIP.name}
-                    className="w-5 h-5 rounded-full object-cover border border-violet-500"
-                  />
+                  {currentIP.avatarUrl ? (
+                    <img
+                      src={currentIP.avatarUrl}
+                      alt={currentIP.name}
+                      className="w-5 h-5 rounded-full object-cover border border-violet-500"
+                    />
+                  ) : (
+                    <div className="w-5 h-5 rounded-full bg-violet-700/50 flex items-center justify-center text-[10px] text-violet-200 font-bold border border-violet-500 flex-shrink-0">
+                      {currentIP.name ? currentIP.name.slice(0, 1) : 'IP'}
+                    </div>
+                  )}
                   <span>{currentIP.name}</span>
                 </>
               ) : (
@@ -146,7 +171,13 @@ export function StoryStudio({
                       }`}
                     >
                       <div className="flex items-center gap-2 truncate">
-                        <img src={ip.avatarUrl} alt={ip.name} className="w-6 h-6 rounded-full object-cover" />
+                        {ip.avatarUrl ? (
+                          <img src={ip.avatarUrl} alt={ip.name} className="w-6 h-6 rounded-full object-cover" />
+                        ) : (
+                          <div className="w-6 h-6 rounded-full bg-violet-700/50 flex items-center justify-center text-[10px] text-violet-200 font-bold flex-shrink-0">
+                            {ip.name ? ip.name.slice(0, 1) : 'IP'}
+                          </div>
+                        )}
                         <span className="font-medium truncate">{ip.name}</span>
                       </div>
                       {currentIP?.id === ip.id && <Check className="w-3.5 h-3.5 text-violet-400" />}
@@ -206,20 +237,9 @@ export function StoryStudio({
         </div>
       </div>
 
-      {/* 3-Column Studio Workspace */}
+      {/* 2-Column Studio Workspace */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Left Column: AI Chat Co-pilot */}
-        <div className="w-80 lg:w-96 flex-shrink-0 h-full">
-          <AIChatPane
-            messages={chatMessages}
-            onSendMessage={onSendMessage}
-            isLoading={isChatLoading}
-            activeSkills={skills.filter(s => activeSkillIds.includes(s.id))}
-            currentIP={currentIP}
-          />
-        </div>
-
-        {/* Center Column: 6-Panel Storyboard Canvas */}
+        {/* Main Canvas: 6-Panel Storyboard Canvas */}
         <StoryboardCanvas
           story={story}
           currentIP={currentIP}
@@ -231,6 +251,8 @@ export function StoryStudio({
           isRendering={isRendering}
           selectedFrameId={selectedFrameId}
           onSelectFrame={setSelectedFrameId}
+          onResetStory={handleResetStory}
+          onUpdateStory={onUpdateStory}
         />
 
         {/* Right Column: Xiaohongshu Phone Simulator & Cover Customizer */}

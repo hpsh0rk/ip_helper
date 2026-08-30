@@ -1,7 +1,6 @@
 import { IPProfile, StoryScript, StoryboardFrame, Locale, StylePreset } from '@/types';
 import { buildSystemPromptWithSkills } from '@/lib/skills/loader';
 import { compileDiffusionPrompt } from '@/lib/i18n/promptTranslator';
-import { generateDiffusionImageURL, buildDiffusionPromptString } from '@/lib/render/imageEngine';
 
 export interface ChatResponseResult {
   reply: string;
@@ -218,14 +217,6 @@ export function generateStoryboardForIP(
 
   const frames: StoryboardFrame[] = scenes.map((s, idx) => {
     const { promptEn } = compileDiffusionPrompt(s.zh, ip, ip.stylePreset);
-    const scenePrompt = buildDiffusionPromptString(
-      s.zh,
-      ip,
-      ip.stylePreset,
-      idx % 2 === 0 ? 'front' : 'side',
-      idx === 3 ? 'shocked panic expression' : idx === 5 ? 'happy warm healing smile' : 'smile'
-    );
-    const sceneImg = generateDiffusionImageURL(scenePrompt, 600, 800, Date.now() + idx * 7);
 
     return {
       id: `frame-${Date.now()}-${idx + 1}`,
@@ -235,9 +226,9 @@ export function generateStoryboardForIP(
       visualPromptEn: promptEn,
       narration: s.narration,
       dialogue: s.dialogue,
-      imageUrl: sceneImg,
+      imageUrl: '',
       isCover: idx === 0,
-      status: 'completed'
+      status: 'idle'
     };
   });
 
@@ -283,6 +274,7 @@ export function generateStoryboardForIP(
       fontSize: 26,
       position: 'bottom'
     },
+    baseImageUrl: ip.avatarUrl || ip.assets?.[0]?.url || ip.turnaroundSheets?.front || '',
     createdAt: new Date().toISOString(),
     locale
   };

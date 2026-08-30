@@ -1,5 +1,5 @@
 import { StoryboardFrame, IPProfile, StylePreset, GenerationMode } from '@/types';
-import { compileDiffusionPrompt } from '@/lib/i18n/promptTranslator';
+import { compileDiffusionPrompt, translateAndRefineChinesePrompt } from '@/lib/i18n/promptTranslator';
 import { buildDiffusionPromptString } from '@/lib/render/imageEngine';
 import { generateImageViaServerCli } from '@/lib/render/serverCliGenerator';
 
@@ -58,49 +58,96 @@ export async function renderCharacterTurnaroundsServer(
   };
 }
 
+import { updateStoryFrameOnServer } from '@/lib/db/fileDb.server';
+
 export async function renderSingleFrameServer(
   frame: StoryboardFrame,
   ipProfile?: IPProfile,
   stylePreset: StylePreset = '3D Clay',
   mode: GenerationMode = 'text-to-image',
-  referenceImageUrl?: string
+  referenceImageUrl?: string,
+  storyId?: string
 ): Promise<StoryboardFrame> {
+  const baseImage = referenceImageUrl || ipProfile?.avatarUrl || ipProfile?.turnaroundSheets?.front || ipProfile?.assets?.[0]?.url;
+  const isImg2Img = Boolean(baseImage);
+
+  // Clean English translation of the scene composition description
+  const scenePrompt = translateAndRefineChinesePrompt(frame.visualPrompt) || frame.visualPrompt;
   const { promptEn } = compileDiffusionPrompt(frame.visualPrompt, ipProfile, stylePreset);
 
-  let fullPrompt = buildDiffusionPromptString(
-    frame.visualPromptEn || promptEn || frame.visualPrompt,
-    ipProfile,
-    stylePreset,
-    frame.frameNumber % 2 === 0 ? 'side' : 'front'
-  );
+  const dynamicTargetPrompt = isImg2Img
+    ? `${scenePrompt}, featuring the character from the reference image, in ${stylePreset} style, single standalone image, single frame, no split screen, no grid, no multi-panel, no comic strip, no speech bubbles, no text, 3:4 vertical portrait aspect ratio composition, expressive action scene, masterpiece, best quality`
+    : (promptEn || buildDiffusionPromptString(frame.visualPrompt, ipProfile, stylePreset));
 
-  if (mode === 'image-to-image' && (referenceImageUrl || ipProfile?.avatarUrl)) {
-    fullPrompt = `character consistency lock with reference image, ${fullPrompt}`;
+  // Determine if frame.visualPromptEn has genuine custom scene prompt or is stale/generic portrait
+  let fullPrompt = frame.visualPromptEn;
+  const sceneCore = scenePrompt.split(',')[0].trim();
+  const isGenericOrStale = !fullPrompt || 
+                           !fullPrompt.trim() || 
+                           (sceneCore && !fullPrompt.includes(sceneCore));
+
+  if (isGenericOrStale) {
+    fullPrompt = dynamicTargetPrompt;
   }
 
   const result = await generateImageViaServerCli(fullPrompt, {
     width: 450,
     height: 600,
     ipName: ipProfile?.name,
-    referenceImageUrl: mode === 'image-to-image' ? referenceImageUrl || ipProfile?.avatarUrl : undefined
+    referenceImageUrl: baseImage
   });
   const imageUrl = result.imageUrls[0] || '';
+  const status: 'completed' | 'error' = imageUrl ? 'completed' : 'error';
 
-  return {
+  const updatedFrame: StoryboardFrame = {
     ...frame,
-    visualPromptEn: promptEn,
+    visualPromptEn: fullPrompt,
     imageUrl,
-    status: imageUrl ? 'completed' : 'error'
+    status,
+    logId: result.logId,
+    lastError: result.error
   };
+
+  // Instant DB Persistence: Save frame to disk immediately upon generation
+  try {
+    updateStoryFrameOnServer(storyId, frame.id, {
+      imageUrl,
+      visualPromptEn: fullPrompt,
+      status,
+      logId: result.logId,
+      lastError: result.error
+    });
+  } catch (err) {
+    console.error('Failed to auto-persist rendered frame to disk:', err);
+  }
+
+  return updatedFrame;
 }
 
 export async function renderAllFramesServer(
   frames: StoryboardFrame[],
   ipProfile?: IPProfile,
   stylePreset: StylePreset = '3D Clay',
-  mode: GenerationMode = 'text-to-image'
+  mode: GenerationMode = 'text-to-image',
+  referenceImageUrl?: string,
+  storyId?: string
 ): Promise<StoryboardFrame[]> {
-  return Promise.all(
-    frames.map((frame) => renderSingleFrameServer(frame, ipProfile, stylePreset, mode, ipProfile?.avatarUrl))
-  );
+  const baseImage = referenceImageUrl || ipProfile?.avatarUrl || ipProfile?.turnaroundSheets?.front || ipProfile?.assets?.[0]?.url;
+  const effectiveMode = baseImage ? 'image-to-image' : mode;
+
+  // Use sequential pipeline execution to prevent process race conditions & API 429 quota exhaustion
+  const renderedList: StoryboardFrame[] = [];
+  for (const frame of frames) {
+    const rendered = await renderSingleFrameServer(
+      frame,
+      ipProfile,
+      stylePreset,
+      effectiveMode,
+      baseImage,
+      storyId
+    );
+    renderedList.push(rendered);
+  }
+
+  return renderedList;
 }

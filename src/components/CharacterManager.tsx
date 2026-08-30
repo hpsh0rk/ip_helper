@@ -103,7 +103,20 @@ export function CharacterManager({
   onShowToast
 }: CharacterManagerProps) {
   const { locale } = useI18n();
-  const [selectedIP, setSelectedIP] = useState<IPProfile | null>(currentIP || ips[0] || null);
+  const [selectedIP, setSelectedIP] = useState<IPProfile | null>(currentIP || (ips.length > 0 ? ips[0] : null));
+
+  // Sync selectedIP whenever currentIP or ips list changes from parent
+  useEffect(() => {
+    if (currentIP) {
+      setSelectedIP(currentIP);
+    } else if (ips.length > 0) {
+      if (!selectedIP || !ips.some(ip => ip.id === selectedIP.id)) {
+        setSelectedIP(ips[0]);
+      }
+    } else {
+      setSelectedIP(null);
+    }
+  }, [currentIP, ips]);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedAssetFilter, setSelectedAssetFilter] = useState<string>('all');
 
@@ -564,6 +577,7 @@ export function CharacterManager({
 
     const updatedIP: IPProfile = {
       ...activeEditingIP,
+      archetype: activeEditingIP.archetype?.trim() || activeEditingIP.description?.trim() || activeEditingIP.name.trim(),
       avatarUrl: shouldUpdateAvatar ? generatedPreviewUrl : activeEditingIP.avatarUrl,
       assets: updatedAssets,
       turnaroundSheets: {
@@ -575,13 +589,12 @@ export function CharacterManager({
     };
 
     if (isCreatingNew) {
-      setDraftIP(updatedIP);
-    } else {
-      setSelectedIP(updatedIP);
+      setIsCreatingNew(false);
     }
-
+    setSelectedIP(updatedIP);
+    onSelectIP(updatedIP);
     onSaveIP(updatedIP);
-    onShowToast(`✅ 已将资产保存至【${updatedIP.name}】（共 ${stagedTagIds.length} 个标签）！`);
+    onShowToast(`✅ 已成功保存【${updatedIP.name}】及新资产入库（共 ${stagedTagIds.length} 个标签）！`);
   };
 
   // Save Existing Asset Tags from Modal (Requirement 5)
@@ -707,15 +720,39 @@ export function CharacterManager({
               ➕ 新建 IP 角色
             </button>
           ) : (
-            <button
-              onClick={() => {
-                setIsCreatingNew(false);
-                setSelectedIP(ips[0] || null);
-              }}
-              className="px-3.5 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-semibold cursor-pointer"
-            >
-              退出新建模式
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  if (!draftIP.name.trim()) {
+                    onShowToast('请先填写角色名字再保存');
+                    return;
+                  }
+                  const finalIP = {
+                    ...draftIP,
+                    archetype: draftIP.archetype?.trim() || draftIP.description?.trim() || draftIP.name.trim()
+                  };
+                  onSaveIP(finalIP);
+                  onSelectIP(finalIP);
+                  setSelectedIP(finalIP);
+                  setIsCreatingNew(false);
+                  onShowToast(`✅ 已成功创建并保存角色【${finalIP.name}】！`);
+                }}
+                className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition-all shadow-md shadow-emerald-600/20 cursor-pointer"
+              >
+                <Save className="w-3.5 h-3.5" />
+                <span>保存入库</span>
+              </button>
+              <button
+                onClick={() => {
+                  setIsCreatingNew(false);
+                  setSelectedIP(currentIP || ips[0] || null);
+                }}
+                className="px-3 py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs font-semibold cursor-pointer"
+              >
+                取消
+              </button>
+            </div>
           )}
         </div>
       </div>
@@ -724,7 +761,27 @@ export function CharacterManager({
       <div className="flex-1 flex overflow-hidden">
         {/* Left Column: Character List (Width: 260px) */}
         <div className="w-64 border-r border-zinc-800 bg-zinc-950/40 flex flex-col h-full flex-shrink-0">
-          <div className="p-3 border-b border-zinc-800/80">
+          <div className="p-3 border-b border-zinc-800/80 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider">
+                角色列表 ({ips.length})
+              </span>
+              {ips.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (window.confirm('确定要清空所有 IP 角色档案吗？清空后不可恢复。')) {
+                      onDeleteIP('all');
+                      onShowToast('🗑️ 已清空所有 IP 角色档案');
+                    }
+                  }}
+                  className="text-[10px] text-zinc-500 hover:text-red-400 cursor-pointer transition-colors"
+                  title="清空所有角色"
+                >
+                  清空全部
+                </button>
+              )}
+            </div>
             <div className="relative">
               <Search className="w-3.5 h-3.5 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
               <input
@@ -782,16 +839,22 @@ export function CharacterManager({
                   }`}
                 >
                   <div className="flex items-start gap-3">
-                    <img
-                      src={ip.avatarUrl || 'https://images.unsplash.com/photo-1514888286974-6c03e2ca1dba?w=400&auto=format&fit=crop&q=80'}
-                      alt={ip.name}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleOpenLightbox(ip.avatarUrl, `${ip.name} - 主形象`, undefined, ['avatar', 'front']);
-                      }}
-                      className="w-11 h-11 rounded-xl object-cover border border-zinc-700/80 flex-shrink-0 hover:scale-105 transition-transform"
-                      title="点击放大查看头像"
-                    />
+                    {ip.avatarUrl ? (
+                      <img
+                        src={ip.avatarUrl}
+                        alt={ip.name}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleOpenLightbox(ip.avatarUrl, `${ip.name} - 主形象`, undefined, ['avatar', 'front']);
+                        }}
+                        className="w-11 h-11 rounded-xl object-cover border border-zinc-700/80 flex-shrink-0 hover:scale-105 transition-transform"
+                        title="点击放大查看头像"
+                      />
+                    ) : (
+                      <div className="w-11 h-11 rounded-xl bg-violet-700/40 border border-zinc-700/80 flex items-center justify-center text-xs font-bold text-violet-200 flex-shrink-0">
+                        {ip.name ? ip.name.slice(0, 1) : 'IP'}
+                      </div>
+                    )}
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center justify-between gap-1">
                         <h3 className="font-bold text-xs text-zinc-100 truncate">{ip.name}</h3>
@@ -843,13 +906,19 @@ export function CharacterManager({
             {/* Character Context Top Navigation Bar */}
             <div className="p-3 px-6 border-b border-zinc-800 bg-zinc-900/60 flex flex-wrap items-center justify-between gap-3 flex-shrink-0">
               <div className="flex items-center gap-3">
-                <img
-                  src={activeEditingIP.avatarUrl || 'https://images.unsplash.com/photo-1514888286974-6c03e2ca1dba?w=400&auto=format&fit=crop&q=80'}
-                  alt={activeEditingIP.name}
-                  onClick={() => handleOpenLightbox(activeEditingIP.avatarUrl, `${activeEditingIP.name} 主头像`)}
-                  className="w-10 h-10 rounded-xl object-cover border border-zinc-700 hover:scale-105 transition-transform cursor-pointer shadow"
-                  title="点击放大头像"
-                />
+                {activeEditingIP.avatarUrl ? (
+                  <img
+                    src={activeEditingIP.avatarUrl}
+                    alt={activeEditingIP.name}
+                    onClick={() => handleOpenLightbox(activeEditingIP.avatarUrl, `${activeEditingIP.name} 主头像`)}
+                    className="w-10 h-10 rounded-xl object-cover border border-zinc-700 hover:scale-105 transition-transform cursor-pointer shadow"
+                    title="点击放大头像"
+                  />
+                ) : (
+                  <div className="w-10 h-10 rounded-xl bg-violet-700/40 border border-zinc-700 flex items-center justify-center text-xs font-bold text-violet-200 flex-shrink-0">
+                    {activeEditingIP.name ? activeEditingIP.name.slice(0, 1) : 'IP'}
+                  </div>
+                )}
                 <div>
                   <div className="flex items-center gap-2">
                     <h2 className="text-sm font-bold text-zinc-100 flex items-center gap-1.5">
@@ -903,10 +972,21 @@ export function CharacterManager({
 
                 <button
                   onClick={() => {
-                    onSaveIP(activeEditingIP);
-                    onGoToStoryStudio(activeEditingIP);
+                    if (!activeEditingIP || !activeEditingIP.name.trim()) {
+                      onShowToast('请先为角色填写名字');
+                      return;
+                    }
+                    const finalIP = {
+                      ...activeEditingIP,
+                      archetype: activeEditingIP.archetype?.trim() || activeEditingIP.description?.trim() || activeEditingIP.name.trim()
+                    };
+                    onSaveIP(finalIP);
+                    onSelectIP(finalIP);
+                    setSelectedIP(finalIP);
+                    if (isCreatingNew) setIsCreatingNew(false);
+                    onGoToStoryStudio(finalIP);
                   }}
-                  className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-violet-600 to-purple-600 hover:from-violet-500 hover:to-purple-500 text-white text-xs font-bold shadow-md shadow-violet-600/20 transition-all cursor-pointer"
+                  className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-zinc-100 text-xs font-semibold border border-zinc-700/80 hover:border-violet-500/40 shadow-xs transition-all cursor-pointer"
                 >
                   <span>🎬 去故事工坊创作</span>
                   <ArrowRight className="w-3.5 h-3.5" />
@@ -957,7 +1037,7 @@ export function CharacterManager({
                     {inputMode === 'generate' ? (
                       <div className="space-y-3">
                         {/* Reference Image Derivation Slot (Image-to-Image) */}
-                        {referenceImage ? (
+                        {referenceImage && referenceImage.url ? (
                           <div className="p-2.5 rounded-xl bg-violet-950/40 border border-violet-500/50 flex items-center justify-between gap-3 animate-in fade-in shadow-md">
                             <div className="flex items-center gap-2.5 overflow-hidden">
                               <img
@@ -1516,7 +1596,9 @@ export function CharacterManager({
                                 className="group/thumb relative aspect-[3/4] w-full rounded-lg overflow-hidden bg-black cursor-pointer mb-2"
                                 title="点击全屏放大"
                               >
-                                <img src={card.url} alt="batch result" className="w-full h-full object-cover group-hover/thumb:scale-105 transition-transform" />
+                                {card.url ? (
+                                  <img src={card.url} alt="batch result" className="w-full h-full object-cover group-hover/thumb:scale-105 transition-transform" />
+                                ) : null}
                                 <div className="absolute inset-0 bg-black/40 opacity-0 group-hover/thumb:opacity-100 transition-opacity flex items-center justify-center gap-1 text-[10px] text-white font-bold">
                                   <Maximize2 className="w-3.5 h-3.5" />
                                   <span>放大预览</span>
@@ -1665,7 +1747,7 @@ export function CharacterManager({
                         onSaveIP(activeEditingIP);
                         onGoToStoryStudio(activeEditingIP);
                       }}
-                      className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-violet-600 hover:bg-violet-500 text-white text-xs font-bold shadow-md shadow-violet-600/30 transition-all cursor-pointer"
+                      className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-zinc-100 text-xs font-semibold border border-zinc-700/80 hover:border-violet-500/40 shadow-xs transition-all cursor-pointer"
                     >
                       <span>🎬 去故事工坊创作</span>
                       <ArrowRight className="w-3.5 h-3.5" />
@@ -1725,11 +1807,13 @@ export function CharacterManager({
                               className="relative aspect-[3/4] w-full rounded-xl overflow-hidden bg-zinc-950 border border-zinc-800 cursor-pointer group/card"
                               title="点击放大查看图片"
                             >
-                              <img
-                                src={asset.url}
-                                alt="asset"
-                                className="w-full h-full object-cover group-hover/card:scale-105 transition-transform duration-300"
-                              />
+                              {asset.url ? (
+                                <img
+                                  src={asset.url}
+                                  alt="asset"
+                                  className="w-full h-full object-cover group-hover/card:scale-105 transition-transform duration-300"
+                                />
+                              ) : null}
                               
                               {/* Hover Zoom Overlay */}
                               <div className="absolute inset-0 bg-black/40 opacity-0 group-hover/card:opacity-100 transition-opacity flex items-center justify-center gap-1 text-[11px] text-white font-bold backdrop-blur-[1px]">
@@ -1847,20 +1931,6 @@ export function CharacterManager({
                         完善视觉锚点与人物性格，自动在后续分镜生成与故事创作中精准保持角色一致性
                       </p>
                     </div>
-
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          onSaveIP(activeEditingIP);
-                          onShowToast(`✅ 已保存【${activeEditingIP.name}】角色人设档案！`);
-                        }}
-                        className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-violet-600 hover:bg-violet-500 text-white text-xs font-bold shadow-md shadow-violet-600/30 transition-all cursor-pointer"
-                      >
-                        <Save className="w-3.5 h-3.5" />
-                        <span>💾 保存角色档案</span>
-                      </button>
-                    </div>
                   </div>
 
                   {/* Clarification Notice Banner (Requirement: Fixed Text Notice) */}
@@ -1965,8 +2035,20 @@ export function CharacterManager({
                       <button
                         type="button"
                         onClick={() => {
-                          onSaveIP(activeEditingIP);
-                          onShowToast(`✅ 已保存【${activeEditingIP.name}】角色人设档案！`);
+                          if (!activeEditingIP || !activeEditingIP.name.trim()) {
+                            onShowToast('请先为角色填写名字');
+                            return;
+                          }
+                          const finalIP = {
+                            ...activeEditingIP,
+                            archetype: activeEditingIP.archetype?.trim() || activeEditingIP.description?.trim() || activeEditingIP.name.trim()
+                          };
+                          onSaveIP(finalIP);
+                          onSelectIP(finalIP);
+                          setSelectedIP(finalIP);
+                          if (isCreatingNew) setIsCreatingNew(false);
+                          setActiveWorkspaceTab('visual_studio');
+                          onShowToast(`✅ 已保存【${finalIP.name}】角色人设档案！`);
                         }}
                         className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-md shadow-emerald-600/30 transition-all cursor-pointer flex items-center gap-1.5"
                       >
@@ -1977,8 +2059,19 @@ export function CharacterManager({
                       <button
                         type="button"
                         onClick={() => {
-                          onSaveIP(activeEditingIP);
-                          onGoToStoryStudio(activeEditingIP);
+                          if (!activeEditingIP || !activeEditingIP.name.trim()) {
+                            onShowToast('请先为角色填写名字');
+                            return;
+                          }
+                          const finalIP = {
+                            ...activeEditingIP,
+                            archetype: activeEditingIP.archetype?.trim() || activeEditingIP.description?.trim() || activeEditingIP.name.trim()
+                          };
+                          onSaveIP(finalIP);
+                          onSelectIP(finalIP);
+                          setSelectedIP(finalIP);
+                          if (isCreatingNew) setIsCreatingNew(false);
+                          onGoToStoryStudio(finalIP);
                         }}
                         className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-purple-600 hover:from-violet-500 hover:to-purple-500 text-white text-xs font-bold shadow-md shadow-violet-600/30 transition-all cursor-pointer flex items-center gap-1.5"
                       >

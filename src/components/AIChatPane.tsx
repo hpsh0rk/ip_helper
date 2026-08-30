@@ -95,7 +95,13 @@ export function AIChatPane({
             <p>{t.chat.systemWelcome}</p>
             {currentIP && (
               <div className="p-2 rounded-xl bg-violet-950/30 border border-violet-500/30 flex items-center gap-2 mt-2">
-                <img src={currentIP.avatarUrl} alt={currentIP.name} className="w-6 h-6 rounded-full object-cover" />
+                {currentIP.avatarUrl ? (
+                  <img src={currentIP.avatarUrl} alt={currentIP.name} className="w-6 h-6 rounded-full object-cover" />
+                ) : (
+                  <div className="w-6 h-6 rounded-full bg-violet-700/50 flex items-center justify-center text-[10px] text-violet-200 font-bold flex-shrink-0">
+                    {currentIP.name ? currentIP.name.slice(0, 1) : 'IP'}
+                  </div>
+                )}
                 <div>
                   <span className="text-zinc-200 font-semibold text-[11px]">{currentIP.name}</span>
                   <p className="text-[10px] text-zinc-400">{currentIP.archetype}</p>

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { translations } from '../lib/i18n/translations';
-import { compileDiffusionPrompt } from '../lib/i18n/promptTranslator';
+import { compileDiffusionPrompt, translateAndRefineChinesePrompt } from '../lib/i18n/promptTranslator';
 import { IPProfile } from '../types';
 
 describe('Internationalization (i18n) & Prompt Translation', () => {
@@ -53,5 +53,48 @@ describe('Internationalization (i18n) & Prompt Translation', () => {
     expect(promptEn).toContain('3:4 vertical vertical portrait');
     expect(promptEn).toContain('3D claymation');
     expect(negativePrompt).toContain('lowres, bad anatomy');
+  });
+
+  it('should accurately translate user storyboard scene: 清晨温暖阳光洒下，小酒带着日常装扮，元气满满准备开展新计划', () => {
+    const userScene = '清晨温暖阳光洒下，小酒带着日常装扮，元气满满准备开展新计划';
+    const translated = translateAndRefineChinesePrompt(userScene);
+
+    expect(translated).toContain('early morning');
+    expect(translated).toContain('warm golden morning sunlight streaming down');
+    expect(translated).toContain('wearing cute casual everyday outfit');
+    expect(translated).toContain('full of vibrant energy');
+    expect(translated).toContain('start a brand new project and plan');
+
+    const customIP: IPProfile = {
+      id: 'test-ip-xiaojiu',
+      name: '小酒',
+      archetype: '小酒',
+      visualAnchors: { hair: '', clothing: '', accessories: '', colorPalette: [], distinctiveFeatures: '' },
+      personality: { traits: [], tagline: '', catchphrase: '', flawOrConflict: '' },
+      worldview: '',
+      stylePreset: '3D Clay',
+      avatarUrl: '',
+      assets: [],
+      turnaroundSheets: {},
+      expressionSheets: [],
+      loraWeights: { face: 0.8, costume: 0.8, style: 0.8 },
+      createdAt: '',
+      locale: 'zh'
+    };
+
+    const compiled = compileDiffusionPrompt(userScene, customIP, '3D Clay');
+    expect(compiled.promptEn).toContain('main character 小酒');
+    expect(compiled.promptEn).toContain('early morning');
+    expect(compiled.promptEn).toContain('warm golden morning sunlight streaming down');
+    expect(compiled.promptEn).toContain('wearing cute casual everyday outfit');
+    expect(compiled.promptEn).toContain('full of vibrant energy');
+    expect(compiled.promptEn).toContain('3D claymation');
+  });
+
+  it('should correctly handle substitution prompts like 把小狗换为小熊 without golden retriever contamination', () => {
+    const prompt = translateAndRefineChinesePrompt('把小狗换为小熊');
+    expect(prompt).toContain('teddy bear');
+    expect(prompt).not.toContain('golden retriever');
+    expect(prompt).not.toContain('puppy');
   });
 });

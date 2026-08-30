@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useI18n } from '@/lib/i18n/context';
 import { StoryScript, IPProfile } from '@/types';
 import JSZip from 'jszip';
@@ -15,7 +15,8 @@ import {
   Share2, 
   Sparkles, 
   Type, 
-  Check 
+  Check,
+  Image as ImageIcon
 } from 'lucide-react';
 
 interface XhsPreviewPaneProps {
@@ -34,6 +35,7 @@ export function XhsPreviewPane({
   const { t } = useI18n();
   const [currentSlideIndex, setCurrentSlideIndex] = useState(0);
   const [isZipping, setIsZipping] = useState(false);
+  const [imageErrors, setImageErrors] = useState<Record<string, boolean>>({});
 
   if (!story || !story.frames || story.frames.length === 0) {
     return (
@@ -128,13 +130,27 @@ export function XhsPreviewPane({
               </span>
             </div>
 
-            {/* 3:4 Portrait Image Slider Box */}
-            <div className="relative aspect-[3/4] w-full bg-zinc-900 overflow-hidden group">
-              <img
-                src={currentFrame.imageUrl}
-                alt={currentFrame.title}
-                className="w-full h-full object-cover select-none"
-              />
+            <div className="relative aspect-[3/4] w-full bg-zinc-900 overflow-hidden group flex items-center justify-center">
+              {currentFrame.imageUrl && !imageErrors[currentFrame.id] ? (
+                <img
+                  src={currentFrame.imageUrl}
+                  alt={currentFrame.title}
+                  onError={() => setImageErrors(prev => ({ ...prev, [currentFrame.id]: true }))}
+                  className="w-full h-full object-cover select-none"
+                />
+              ) : (
+                <div className="w-full h-full flex flex-col items-center justify-center text-zinc-400 gap-2.5 p-6 text-center bg-gradient-to-b from-zinc-800/90 via-zinc-900 to-zinc-950">
+                  <div className="w-12 h-12 rounded-2xl bg-zinc-800/80 border border-zinc-700/60 flex items-center justify-center text-zinc-400">
+                    <ImageIcon className="w-6 h-6 opacity-60" />
+                  </div>
+                  <span className="text-xs font-semibold text-zinc-300">
+                    {isCoverSlide ? '待生成封面配图' : `P${currentSlideIndex + 1} 待生成分镜配图`}
+                  </span>
+                  <span className="text-[10px] text-zinc-500 max-w-[200px]">
+                    点击中间栏顶部【批量渲染全部配图】即可一键出图
+                  </span>
+                </div>
+              )}
 
               {/* Cover Typography Overlay (Rendered on Cover Slide) */}
               {isCoverSlide && (

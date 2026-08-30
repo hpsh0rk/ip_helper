@@ -10,7 +10,7 @@ import { getIPById } from '@/lib/db/fileDb.server';
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { frame, frames, ipId, stylePreset, characterIP, type, providerId, mode, referenceImageUrl, prompt, width, height } = body;
+    const { frame, frames, ipId, storyId, stylePreset, characterIP, type, providerId, mode, referenceImageUrl, prompt, width, height } = body;
 
     // Direct image generation using Antigravity CLI Engine (agy -p)
     if (type === 'direct_prompt' || prompt) {
@@ -41,12 +41,12 @@ export async function POST(req: NextRequest) {
     }
 
     if (frame) {
-      const rendered = await renderSingleFrame(frame, ipProfile, stylePreset, mode, referenceImageUrl);
+      const rendered = await renderSingleFrame(frame, ipProfile, stylePreset, mode, referenceImageUrl, storyId);
       return NextResponse.json({ success: true, frame: rendered });
     }
 
     if (frames && Array.isArray(frames)) {
-      const renderedList = await renderAllFrames(frames, ipProfile, stylePreset, mode);
+      const renderedList = await renderAllFrames(frames, ipProfile, stylePreset, mode, referenceImageUrl, storyId);
       return NextResponse.json({ success: true, frames: renderedList });
     }
 
